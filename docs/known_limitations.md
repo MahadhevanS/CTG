@@ -45,3 +45,42 @@ rather than silently worked around:**
    positive count as a primary reason results are not comparable, separate
    from the CV-scheme and window differences already documented in
    PROTOCOL.md.
+
+## 2. CV fold assignments are not reproducible across environments
+
+**Status: accepted, partially mitigated, not retroactively fixed.**
+Decision made 2026-08-18, see `docs/baseline_reproduction_report.md` §2.4.
+
+`src/cv/nested_cv.py`'s `outer_splits()`/`inner_splits()` use
+`StratifiedGroupKFold(shuffle=True, random_state=seed)`. This is only
+reproducible *within one fixed scikit-learn version* — `random_state`
+does not guarantee bit-identical splits across sklearn versions. Because
+`run_baseline_reproduction.py`'s resume logic skips any `(seed, fold)`
+already present in the results JSONL, the Phase 0 baseline reproduction
+run's 50 stored folds are a mixture of splits computed on at least two
+different machines/environments (the run was started on a CPU laptop and
+finished on a GPU laptop) — **17 of 50 (34%) do not match what the same
+seed produces when recomputed fresh in the final (GPU, pinned sklearn
+1.7.2) environment.**
+
+This does not invalidate any reported AUROC number (every fold is still a
+real, correctly grouped, non-leaking, independently-trained-and-evaluated
+split — leakage is asserted on every fold in every environment). It means
+"seed=k" cannot be treated as a portable, reproducible fold identifier
+across machines or scikit-learn versions, including retroactively for
+Phase 0's own results.
+
+**Mitigation so far**: `requirements.txt` now pins `scikit-learn==1.7.2`
+exactly, so this stops getting worse from this point forward, and any
+single-environment run (including all of Phase 1+, as long as the pin
+holds) will be internally reproducible.
+
+**Not yet done**: the existing Phase 0 fold assignments were not
+regenerated to be bit-exact within the pinned environment (would require
+one more full 50-fold re-run and does not change Phase 0's conclusions).
+If bit-exact reproducibility of the *exact* Phase 0 fold membership is
+ever required (e.g. supplementary material for publication), either
+re-run that job once now under the pin, or — better long-term — freeze
+the actual fold assignments (record IDs per fold) to a committed file
+once, so future phases don't depend on `StratifiedGroupKFold` regenerating
+the same thing across time/environments at all.
