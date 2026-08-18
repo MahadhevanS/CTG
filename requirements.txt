@@ -1,6 +1,6 @@
 # Core DL & ML
 torch>=2.1.0
-scikit-learn>=1.3.0
+scikit-learn==1.7.2
 xgboost>=2.0.0
 
 # Data processing & signal analysis
