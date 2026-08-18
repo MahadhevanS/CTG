@@ -40,7 +40,32 @@ from training.train_utils import set_seed, compute_pos_weight, safe_auroc, boots
 
 DATA_PATH = os.path.join(ROOT, "data", "processed", "phase0_dataset.npz")
 OUT_DIR = os.path.join(ROOT, "docs")
+RESULTS_JSONL = os.path.join(ROOT, "data", "processed", "baseline_reproduction_fold_results.jsonl")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def load_completed_folds():
+    """Reads any prior fold-level results from RESULTS_JSONL (appended
+    incrementally, one line per completed fold). Lets a run survive being
+    killed mid-way (e.g. laptop shutdown) -- on restart, already-completed
+    (seed, fold) pairs are skipped and their results reused rather than
+    re-computed, and new results are appended to the same file."""
+    completed = {}
+    if os.path.exists(RESULTS_JSONL):
+        with open(RESULTS_JSONL, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                completed[(row["seed"], row["fold"])] = row
+    return completed
+
+
+def append_fold_result(row: dict):
+    os.makedirs(os.path.dirname(RESULTS_JSONL), exist_ok=True)
+    with open(RESULTS_JSONL, "a") as f:
+        f.write(json.dumps(row) + "\n")
 
 
 def prep_signals(fhr, uc, mask, train_idx):
@@ -138,8 +163,19 @@ def run(n_seeds: int, epochs: int, patience: int, base_seed: int = 0):
 
     feats_cache = extract_features_batch(fhr, uc, mask)
 
+    completed = load_completed_folds()
+    if completed:
+        print(f"[resume] Found {len(completed)} already-completed (seed, fold) results "
+              f"in {RESULTS_JSONL} -- skipping those, appending new ones.", flush=True)
+
     results = {"crossformer": [], "resnet1d": [], "logreg": [], "gbt": []}
     fold_log = []
+    # Seed any already-completed folds into the in-memory results so a
+    # resumed run's final summary still reflects the full history.
+    for row in completed.values():
+        for name in results:
+            results[name].append(row[name])
+        fold_log.append(row)
 
     t0 = time.time()
     for seed_offset in range(n_seeds):
@@ -148,6 +184,9 @@ def run(n_seeds: int, epochs: int, patience: int, base_seed: int = 0):
         folds = outer_splits(y, groups, n_splits=5, seed=seed)
 
         for fold_i, fold in enumerate(folds):
+            if (seed, fold_i) in completed:
+                continue
+
             train_idx_full, test_idx = fold.train_idx, fold.test_idx
             y_test = y[test_idx]
 
@@ -214,11 +253,13 @@ def run(n_seeds: int, epochs: int, patience: int, base_seed: int = 0):
             elapsed = time.time() - t0
             print(f"[seed {seed} fold {fold_i}] n_test={len(test_idx)} pos={int(y_test.sum())} "
                   f"| crossformer={auc_cf:.3f} resnet={auc_resnet:.3f} logreg={auc_lr:.3f} gbt={auc_gbt:.3f} "
-                  f"| elapsed={elapsed:.0f}s", flush=True)
-            fold_log.append({
+                  f"| elapsed={elapsed:.0f}s | total_done={len(fold_log)+1}/{n_seeds*5}", flush=True)
+            row = {
                 "seed": seed, "fold": fold_i, "n_test": int(len(test_idx)), "n_pos_test": int(y_test.sum()),
                 "crossformer": auc_cf, "resnet1d": auc_resnet, "logreg": auc_lr, "gbt": auc_gbt,
-            })
+            }
+            fold_log.append(row)
+            append_fold_result(row)  # persisted immediately -- survives a kill/shutdown right after this line
 
     summary = {}
     for name, vals in results.items():
